@@ -3,6 +3,7 @@
     "experimentalDecorators": true,
     "target": "es2022",
     "strict": true,
+    "noEmit": true,
     "preserveConstEnums": true,
     "sourceMap": true,
     "module": "es2022",
@@ -14,5 +15,6 @@
     "outDir": "./build/",
     "noImplicitAny": true
   },
-  "exclude": ["node_modules"]
+  "exclude": ["node_modules"],
+  "include": ["tests"]
 }

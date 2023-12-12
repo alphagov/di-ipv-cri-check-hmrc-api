@@ -1,8 +1,7 @@
-import { stackOutputs } from "../resources/cloudformation-helper";
+import { describeStack, StackInfo } from "../resources/cloudformation-helper";
 import { executeStepFunction } from "../resources/stepfunction-helper";
 import {
   clearItems,
-  clearItemsFromTables,
   populateTable,
   populateTables,
 } from "../resources/dynamodb-helper";
@@ -11,101 +10,37 @@ import {
   updateSSMParameter,
 } from "../resources/ssm-param-helper";
 import { SecretsManager } from "@aws-sdk/client-secrets-manager";
+import {
+  clearSession,
+  input as stubInput,
+  personIdentityData,
+  sessionData,
+} from "../resources/session-helper";
 
-jest.setTimeout(30_000);
-
+const input = stubInput();
+const invalidInput = stubInput("AB123003C");
 const secretsManager = new SecretsManager();
+let stack: StackInfo;
 
-const input = {
-  sessionId: "123456789",
-  nino: "AB123003C",
-};
-
-const testUser = {
-  nino: "AB123003C",
-  dob: "1948-04-23",
-  firstName: "Jim",
-  lastName: "Ferguson",
-};
-
-let output: Partial<{
-  CommonStackName: string;
-  NinoAttemptsTable: string;
-  NinoUsersTable: string;
-  NinoCheckStateMachineArn: string;
-}>;
-
-let sessionTableName: string;
-let personIdentityTableName: string;
+beforeAll(async () => (stack = await describeStack()));
 
 beforeEach(async () => {
-  output = await stackOutputs(process.env.STACK_NAME);
-  sessionTableName = `session-${output.CommonStackName}`;
-  personIdentityTableName = `person-identity-${output.CommonStackName}`;
-
   await populateTables(
-    {
-      tableName: sessionTableName,
-      items: {
-        sessionId: input.sessionId,
-        expiryDate: 9999999999,
-      },
-    },
-    {
-      tableName: personIdentityTableName,
-      items: {
-        sessionId: input.sessionId,
-        nino: input.nino,
-        birthDates: [{ value: testUser.dob }],
-        names: [
-          {
-            nameParts: [
-              {
-                type: "GivenName",
-                value: testUser.firstName,
-              },
-              {
-                type: "FamilyName",
-                value: testUser.lastName,
-              },
-            ],
-          },
-        ],
-      },
-    }
+    personIdentityData(stack, input),
+    sessionData(stack, input)
   );
 });
 
-afterEach(
-  async () =>
-    await clearItemsFromTables(
-      {
-        tableName: sessionTableName,
-        items: { sessionId: input.sessionId },
-      },
-      {
-        tableName: personIdentityTableName,
-        items: { sessionId: input.sessionId },
-      },
-      {
-        tableName: output.NinoUsersTable as string,
-        items: { sessionId: input.sessionId },
-      },
-      {
-        tableName: output.NinoAttemptsTable as string,
-        items: { id: input.sessionId },
-      }
-    )
-);
+afterEach(async () => await clearSession(stack, input));
 
 it("should fail when there is more than 2 nino check attempts", async () => {
-  await populateTable(output.NinoAttemptsTable as string, {
+  await populateTable(stack.outputs.NinoAttemptsTable as string, {
     id: input.sessionId,
     attempts: 2,
   });
 
   const startExecutionResult = await executeStepFunction(
-    output.NinoCheckStateMachineArn as string,
+    stack.outputs.NinoCheckStateMachineArn as string,
     input
   );
 
@@ -115,12 +50,12 @@ it("should fail when there is more than 2 nino check attempts", async () => {
 });
 
 it("should fail when there is no user present for given nino", async () => {
-  await clearItems(personIdentityTableName, {
+  await clearItems(stack.personIdentityTableName, {
     sessionId: input.sessionId,
   });
 
   const startExecutionResult = await executeStepFunction(
-    output.NinoCheckStateMachineArn as string,
+    stack.outputs.NinoCheckStateMachineArn as string,
     input
   );
 
@@ -130,12 +65,12 @@ it("should fail when there is no user present for given nino", async () => {
 });
 
 it("should fail when session id is invalid", async () => {
-  await clearItems(sessionTableName, {
+  await clearItems(stack.sessionTableName, {
     sessionId: input.sessionId,
   });
 
   const startExecutionResult = await executeStepFunction(
-    output.NinoCheckStateMachineArn as string,
+    stack.outputs.NinoCheckStateMachineArn as string,
     input
   );
 
@@ -147,16 +82,16 @@ it("should fail when session id is invalid", async () => {
 });
 
 it("should fail when user record already present in nino user table", async () => {
-  await populateTable(output.NinoUsersTable as string, {
-    sessionId: "123456789",
-    nino: "AA000003D",
+  await populateTable(stack.outputs.NinoUsersTable as string, {
+    sessionId: input.sessionId,
+    nino: input.nino,
   });
 
   const startExecutionResult = await executeStepFunction(
-    output.NinoCheckStateMachineArn as string,
+    stack.outputs.NinoCheckStateMachineArn as string,
     {
-      sessionId: "123456789",
-      nino: "AA000003D",
+      sessionId: input.sessionId,
+      nino: input.nino,
     }
   );
 
@@ -165,8 +100,8 @@ it("should fail when user record already present in nino user table", async () =
 
 it("should fail when user NINO does not match with HMRC DB", async () => {
   const startExecutionResult = await executeStepFunction(
-    output.NinoCheckStateMachineArn as string,
-    input
+    stack.outputs.NinoCheckStateMachineArn as string,
+    invalidInput
   );
 
   expect(startExecutionResult.output).toBe(
@@ -187,7 +122,7 @@ describe("NINO check URL is unavailable", () => {
 
   it("should throw an error when URL is unavailable", async () => {
     const startExecutionResult = await executeStepFunction(
-      output.NinoCheckStateMachineArn as string,
+      stack.outputs.NinoCheckStateMachineArn as string,
       input
     );
 
@@ -214,7 +149,7 @@ describe("HMRC bearer token is invalid", () => {
 
   it("should throw an error when token is invalid", async () => {
     const startExecutionResult = await executeStepFunction(
-      output.NinoCheckStateMachineArn as string,
+      stack.outputs.NinoCheckStateMachineArn as string,
       input
     );
 

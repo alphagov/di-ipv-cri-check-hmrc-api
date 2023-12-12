@@ -1,122 +1,53 @@
-import { stackOutputs } from "../resources/cloudformation-helper";
+import { describeStack, StackInfo } from "../resources/cloudformation-helper";
 import { executeStepFunction } from "../resources/stepfunction-helper";
+import { populateTables } from "../resources/dynamodb-helper";
 import {
-  clearItemsFromTables,
-  populateTables,
-} from "../resources/dynamodb-helper";
+  clearSession,
+  input as stubInput,
+  personIdentityData,
+  sessionData,
+} from "../resources/session-helper";
 
-jest.setTimeout(30_000);
+const input = stubInput();
+let stack: StackInfo;
 
-describe("nino-check-happy", () => {
-  const input = {
-    sessionId: "123456789",
-    nino: "AA000003D",
-  };
+beforeAll(async () => (stack = await describeStack()));
 
-  const testUser = {
-    nino: "AA000003D",
-    dob: "1948-04-23",
-    firstName: "Jim",
-    lastName: "Ferguson",
-  };
+beforeEach(async () => {
+  await populateTables(
+    personIdentityData(stack, input),
+    sessionData(stack, input)
+  );
+});
 
-  let sessionTableName: string;
-  let personIdentityTableName: string;
+afterEach(async () => await clearSession(stack, input));
 
-  let output: Partial<{
-    CommonStackName: string;
-    NinoAttemptsTable: string;
-    NinoUsersTable: string;
-    NinoCheckStateMachineArn: string;
-  }>;
-
-  beforeEach(async () => {
-    output = await stackOutputs(process.env.STACK_NAME);
-    sessionTableName = `session-${output.CommonStackName}`;
-    personIdentityTableName = `person-identity-${output.CommonStackName}`;
-
-    await populateTables(
-      {
-        tableName: sessionTableName,
-        items: {
-          sessionId: input.sessionId,
-          expiryDate: 9999999999,
-        },
-      },
-      {
-        tableName: personIdentityTableName,
-        items: {
-          sessionId: input.sessionId,
-          nino: input.nino,
-          birthDates: [{ value: testUser.dob }],
-          names: [
-            {
-              nameParts: [
-                {
-                  type: "GivenName",
-                  value: testUser.firstName,
-                },
-                {
-                  type: "FamilyName",
-                  value: testUser.lastName,
-                },
-              ],
-            },
-          ],
-        },
-      }
-    );
-  });
-
-  afterEach(
-    async () =>
-      await clearItemsFromTables(
-        {
-          tableName: sessionTableName,
-          items: { sessionId: input.sessionId },
-        },
-        {
-          tableName: personIdentityTableName,
-          items: { sessionId: input.sessionId },
-        },
-        {
-          tableName: output.NinoUsersTable as string,
-          items: { sessionId: input.sessionId },
-        },
-        {
-          tableName: output.NinoAttemptsTable as string,
-          items: { id: input.sessionId },
-        }
-      )
+it("should execute nino step function 1st attempt", async () => {
+  const startExecutionResult = await executeStepFunction(
+    stack.outputs.NinoCheckStateMachineArn as string,
+    input
   );
 
-  it("should execute nino step function 1st attempt", async () => {
-    const startExecutionResult = await executeStepFunction(
-      output.NinoCheckStateMachineArn as string,
-      input
-    );
+  expect(startExecutionResult.output).toBe("{}");
+});
 
-    expect(startExecutionResult.output).toBe("{}");
-  });
+it("should execute nino step function 2nd attempt", async () => {
+  const firstExecutionResult = await executeStepFunction(
+    stack.outputs.NinoCheckStateMachineArn as string,
+    {
+      sessionId: input.sessionId,
+      nino: "AB123003C",
+    }
+  );
 
-  it("should execute nino step function 2nd attempt", async () => {
-    const firstExecutionResult = await executeStepFunction(
-      output.NinoCheckStateMachineArn as string,
-      {
-        sessionId: input.sessionId,
-        nino: "AB123003C",
-      }
-    );
+  const secondExecutionResult = await executeStepFunction(
+    stack.outputs.NinoCheckStateMachineArn as string,
+    input
+  );
 
-    const secondExecutionResult = await executeStepFunction(
-      output.NinoCheckStateMachineArn as string,
-      input
-    );
+  expect(firstExecutionResult.output).toBe(
+    '{"error":"CID returned no record"}'
+  );
 
-    expect(firstExecutionResult.output).toBe(
-      '{"error":"CID returned no record"}'
-    );
-
-    expect(secondExecutionResult.output).toBe("{}");
-  });
+  expect(secondExecutionResult.output).toBe("{}");
 });
